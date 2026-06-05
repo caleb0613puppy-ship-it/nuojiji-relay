@@ -1,11 +1,18 @@
 // 持久主动状态（Node，RELAY_STORE=sqlite）。整条 record 以 JSON 存一列，简单可靠。
 
-import Database from 'better-sqlite3';
+import { createRequire } from 'node:module';
 import { makePairKey } from './proactiveStore.js';
+
+// 计算式 require：阻止 esbuild/wrangler 把 better-sqlite3(Node-only)静态打进 Workers bundle。
+function loadSqlite() {
+    const require = createRequire(import.meta.url);
+    return require(['better', 'sqlite3'].join('-'));
+}
 
 export class SqliteProactiveStore {
     constructor(path = './outbox.db') {
         this.kind = 'sqlite';
+        const Database = loadSqlite();
         this.db = new Database(path);
         this.db.pragma('journal_mode = WAL');
         this.db.exec(`

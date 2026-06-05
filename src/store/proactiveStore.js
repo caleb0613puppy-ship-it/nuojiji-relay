@@ -38,8 +38,10 @@ export async function createProactiveStore(env) {
     const storeKind = (typeof process !== 'undefined' && process.env?.RELAY_STORE) || 'memory';
     if (storeKind === 'sqlite') {
         try {
-            const { SqliteProactiveStore } = await import('./sqliteProactiveStore.js');
-            _nodeSingleton = new SqliteProactiveStore(process.env.RELAY_SQLITE_PATH || './outbox.db');
+            // 计算式路径：阻止 esbuild/wrangler 把 sqlite store(及其 better-sqlite3 依赖)静态打进 Workers bundle。
+            // 该文件只在 Node + RELAY_STORE=sqlite 时才加载。
+            const mod = await import(/* @vite-ignore */ './sqliteProactiveStore' + '.js');
+            _nodeSingleton = new mod.SqliteProactiveStore(process.env.RELAY_SQLITE_PATH || './outbox.db');
             return _nodeSingleton;
         } catch (e) {
             console.warn('[proactive] sqlite 不可用，回退内存:', e?.message);

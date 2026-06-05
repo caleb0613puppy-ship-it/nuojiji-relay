@@ -30,8 +30,9 @@ export async function createOutboxStore(env) {
     const storeKind = (typeof process !== 'undefined' && process.env?.RELAY_STORE) || 'memory';
     if (storeKind === 'sqlite') {
         try {
-            const { SqliteOutboxStore } = await import('./sqliteOutboxStore.js');
-            _nodeSingleton = new SqliteOutboxStore(process.env.RELAY_SQLITE_PATH || './outbox.db');
+            // 计算式路径：阻止 esbuild/wrangler 把 sqlite store(及 better-sqlite3)静态打进 Workers bundle。
+            const mod = await import(/* @vite-ignore */ './sqliteOutboxStore' + '.js');
+            _nodeSingleton = new mod.SqliteOutboxStore(process.env.RELAY_SQLITE_PATH || './outbox.db');
             return _nodeSingleton;
         } catch (e) {
             console.warn('[outbox] sqlite 不可用，回退到内存:', e?.message);

@@ -1,13 +1,21 @@
 // 持久 outbox（Node，RELAY_STORE=sqlite）。手机长时间离线也能拉回（按 TTL 清扫）。
 // 依赖 optionalDependencies 的 better-sqlite3；装不上时 outboxStore 工厂会回退到内存。
 
-import Database from 'better-sqlite3';
+import { createRequire } from 'node:module';
 import { DEFAULT_TTL_MS } from './outboxStore.js';
+
+// 计算式 require：阻止 esbuild/wrangler 把 better-sqlite3(Node-only)静态打进 Workers bundle。
+// 本文件只在 Node + RELAY_STORE=sqlite 时被动态加载，require 在 Node 下同步可用。
+function loadSqlite() {
+    const require = createRequire(import.meta.url);
+    return require(['better', 'sqlite3'].join('-'));
+}
 
 export class SqliteOutboxStore {
     constructor(path = './outbox.db', ttlMs = DEFAULT_TTL_MS) {
         this.ttlMs = ttlMs;
         this.kind = 'sqlite';
+        const Database = loadSqlite();
         this.db = new Database(path);
         this.db.pragma('journal_mode = WAL');
         this.db.exec(`
