@@ -14,6 +14,7 @@ import { cors } from 'hono/cors';
 import { requireSecret } from './util/auth.js';
 import { createOutboxStore } from './store/outboxStore.js';
 import { createSubStore } from './store/subStore.js';
+import { createProactiveStore, PROACTIVE_WINDOW_CAP } from './store/proactiveStore.js';
 import { runGeneration } from './ai/aiCaller.js';
 import { dispatchPush } from './push/pushSender.js';
 import { getVapidPublicKey } from './push/webPush.js';
@@ -33,18 +34,20 @@ export function createApp() {
     }));
 
     // 每个请求懒初始化 store（Workers 每次 fetch 都新 env；Node 进程级缓存见下）
-    const stores = { outbox: null, sub: null };
+    const stores = { outbox: null, sub: null, proactive: null };
     async function getStores(env) {
         if (env && env.OUTBOX) {
             // Workers：KV 绑定每次都现取，store 实例无状态可重建
             return {
                 outbox: await createOutboxStore(env),
                 sub: await createSubStore(env),
+                proactive: await createProactiveStore(env),
             };
         }
         // Node：进程级单例
         if (!stores.outbox) stores.outbox = await createOutboxStore(env);
         if (!stores.sub) stores.sub = await createSubStore(env);
+        if (!stores.proactive) stores.proactive = await createProactiveStore(env);
         return stores;
     }
 
@@ -59,6 +62,7 @@ export function createApp() {
     app.use('/ack', requireSecret);
     app.use('/api/push/subscribe', requireSecret);
     app.use('/api/push/unsubscribe', requireSecret);
+    app.use('/proactive/*', requireSecret);
 
     app.post('/generate', async (c) => {
         let body;
@@ -177,6 +181,78 @@ export function createApp() {
         const { sub } = await getStores(c.env);
         await sub.remove(inboxId, subscription || { endpoint });
         return c.json({ ok: true });
+    });
+
+    // ===== Phase 2：后端代理主动消息 =====
+
+    // 注册/更新一对的全量配置（含手机端拼好的 promptTemplate）
+    app.post('/proactive/register', async (c) => {
+        let body;
+        try { body = await c.req.json(); } catch { return c.json({ error: 'invalid json' }, 400); }
+        const {
+            inboxId, userId, charId, promptTemplate, proactiveProfile, lifeState,
+            intensity, proactiveBias, recentMessages, aiSettings, quietHours,
+            charUtcOffsetSeconds, proactiveEnabledAt, lastInteractionAt, enabled,
+        } = body || {};
+        if (!inboxId || userId == null || charId == null || !promptTemplate || !aiSettings) {
+            return c.json({ error: 'inboxId / userId / charId / promptTemplate / aiSettings required' }, 400);
+        }
+        const { proactive } = await getStores(c.env);
+        await proactive.upsert({
+            inboxId, userId: String(userId), charId: String(charId),
+            promptTemplate, proactiveProfile: proactiveProfile || null, lifeState: lifeState || {},
+            intensity: intensity || 'normal', proactiveBias: proactiveBias || 0,
+            recentMessages: Array.isArray(recentMessages) ? recentMessages.slice(-PROACTIVE_WINDOW_CAP) : [],
+            aiSettings, quietHours: quietHours || null,
+            charUtcOffsetSeconds: charUtcOffsetSeconds ?? null,
+            proactiveEnabledAt: proactiveEnabledAt || Date.now(),
+            lastInteractionAt: lastInteractionAt || 0,
+            enabled: enabled !== false,
+        });
+        return c.json({ ok: true });
+    });
+
+    // 增量同步滑窗消息 + lifeState + lastInteractionAt（整窗替换，无 delta）
+    app.post('/proactive/sync-messages', async (c) => {
+        let body;
+        try { body = await c.req.json(); } catch { return c.json({ error: 'invalid json' }, 400); }
+        const { inboxId, userId, charId, recentMessages, lifeState, lastInteractionAt } = body || {};
+        if (!inboxId || userId == null || charId == null) {
+            return c.json({ error: 'inboxId / userId / charId required' }, 400);
+        }
+        const { proactive } = await getStores(c.env);
+        const patch = {};
+        if (Array.isArray(recentMessages)) patch.recentMessages = recentMessages.slice(-PROACTIVE_WINDOW_CAP);
+        if (lifeState) patch.lifeState = lifeState;
+        if (typeof lastInteractionAt === 'number') patch.lastInteractionAt = lastInteractionAt;
+        const ok = await proactive.patch(inboxId, String(userId), String(charId), patch);
+        if (!ok) return c.json({ error: 'pair not registered' }, 404);
+        return c.json({ ok: true });
+    });
+
+    app.post('/proactive/unregister', async (c) => {
+        let body;
+        try { body = await c.req.json(); } catch { return c.json({ error: 'invalid json' }, 400); }
+        const { inboxId, userId, charId } = body || {};
+        if (!inboxId || userId == null || charId == null) return c.json({ error: 'inboxId / userId / charId required' }, 400);
+        const { proactive } = await getStores(c.env);
+        await proactive.remove(inboxId, String(userId), String(charId));
+        return c.json({ ok: true });
+    });
+
+    app.get('/proactive/status', async (c) => {
+        const inboxId = c.req.query('inboxId');
+        if (!inboxId) return c.json({ error: 'inboxId required' }, 400);
+        const { proactive } = await getStores(c.env);
+        const rows = await proactive.listByInbox(inboxId);
+        // 不回 promptTemplate/key 等敏感内容，只回状态
+        return c.json({
+            pairs: rows.map(r => ({
+                userId: r.userId, charId: r.charId, enabled: r.enabled,
+                windowSize: (r.recentMessages || []).length,
+                lastFiredAt: r.lastFiredAt || 0, updatedAt: r.updatedAt,
+            })),
+        });
     });
 
     return app;

@@ -4,11 +4,14 @@
 //
 // 为简单起见，Phase 1 用独立的轻量实现，共享 createOutboxStore 选出的后端种类判断。
 
+let _nodeSingleton = null;
+
 export async function createSubStore(env) {
     if (env && env.OUTBOX && typeof env.OUTBOX.put === 'function') {
         return new KvSubStore(env.OUTBOX);
     }
-    return new MemorySubStore();
+    if (!_nodeSingleton) _nodeSingleton = new MemorySubStore();
+    return _nodeSingleton;
 }
 
 const SUB_TTL_SEC = 60 * 60 * 24 * 60; // 60 天

@@ -27,6 +27,20 @@ serve({ fetch: app.fetch, port }, (info) => {
     console.log(`    store=${process.env.RELAY_STORE || 'memory'}  vapid=${process.env.VAPID_PUBLIC_KEY ? 'on' : 'off (仅轮询)'}`);
 });
 
-// Phase 2：node-cron 定时主动生成
-// import cron from 'node-cron';
-// cron.schedule('*/5 * * * *', async () => { /* proactive gen */ });
+// Phase 2：node-cron 定时主动生成（每分钟 tick，与 Workers cron 对齐）
+import cron from 'node-cron';
+import { runProactiveTick } from './src/proactive/tick.js';
+
+let _ticking = false;
+cron.schedule('* * * * *', async () => {
+    if (_ticking) return; // 防上一轮没跑完又进
+    _ticking = true;
+    try {
+        const r = await runProactiveTick({}); // Node：env 空对象 → store 走 memory/sqlite
+        if (r.fired > 0) console.log(`[proactive] tick: ${r.fired}/${r.pairs} fired`);
+    } catch (e) {
+        console.error('[proactive] node-cron tick failed:', e?.message);
+    } finally {
+        _ticking = false;
+    }
+});

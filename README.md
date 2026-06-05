@@ -120,8 +120,25 @@ docker run -d -p 8787:8787 \
 | GET | `/api/push/vapid-key` | 取 VAPID 公钥 |
 | POST | `/api/push/subscribe` | 注册推送订阅 |
 | DELETE | `/api/push/unsubscribe` | 退订 |
+| POST | `/proactive/register` | 注册主动消息（含手机端拼好的 prompt 模板） |
+| POST | `/proactive/sync-messages` | 增量同步滑窗上下文 + lifeState |
+| POST | `/proactive/unregister` | 取消主动消息 |
+| GET | `/proactive/status?inboxId=` | 查主动消息状态（不含敏感内容） |
 
 除 `/health` 外都需 `Authorization: Bearer <RELAY_SECRET>`。
+
+---
+
+## 主动消息（角色 App 关闭也能找你）
+
+开启后，**App 完全关闭/被杀时**，后端按定时任务（cron，每分钟一次）重算每个角色的「想找你冲动值」，
+命中就**实时调你的 AI** 生成一条最新的主动消息，存进 outbox + 发推送叫醒手机。
+
+- **决策算法**（什么时候该主动发）在后端，是**纯数值逻辑**（沉默时长、时段、心情、承诺到点…），开源可见。
+- **提示词文本和构建逻辑不在后端代码里**：手机在前台时把拼好的完整 system prompt（含 `{{RECENT_MESSAGES}}` / `{{IMPULSE_REASON}}` 占位符）注册给后端，后端只做字符串替换再发出去。**GitHub 仓库里看不到任何提示词/人设/越狱框架。**
+- 你的人设、最近聊天上下文、AI key 会存在**你自己的后端**（KV/sqlite/内存）—— 这是「App 关闭也能主动生成」的物理前提，作者服务器仍然不碰。
+- Cloudflare 用 Cron Triggers（`wrangler.toml` 已配 `crons=["* * * * *"]`）；Node 用内置 node-cron。
+- ⚠️ Workers 有 CPU 时长/调用配额，适合中小规模；角色数量多、想要更稳的定时主动 → 用 VPS/Docker 长驻进程。
 
 ---
 
@@ -135,6 +152,6 @@ docker run -d -p 8787:8787 \
 
 ## 路线图
 
-- **Phase 1（当前）**：服务端跑完手机发起的回复 + outbox 拉取 + Web Push/轮询。
-- **Phase 2**：定时主动生成（角色主动找你）+ iOS APNs / Android FCM 原生推送
-  （`worker.js` 的 `scheduled` 和 `server.js` 的 node-cron 已留好挂载点）。
+- **Phase 1（已完成）**：服务端跑完手机发起的回复 + outbox 拉取 + Web Push/轮询。
+- **Phase 2（已完成）**：后端 cron 定时主动生成（角色主动找你，App 关闭也能用），提示词不进仓库。
+- **后续**：iOS APNs / Android FCM 原生推送（`src/push/apns.js` `fcm.js` 已留 stub），让 App 被杀时也能弹推送（当前靠轮询兜底）。

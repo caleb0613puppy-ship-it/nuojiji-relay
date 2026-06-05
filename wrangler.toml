@@ -17,6 +17,8 @@ id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
 #   wrangler secret put VAPID_PRIVATE_KEY
 #   wrangler secret put VAPID_SUBJECT        # 如 mailto:you@example.com
 
-# Phase 2：定时主动生成。取消注释启用。
-# [triggers]
-# crons = ["*/5 * * * *"]
+# Phase 2：定时主动生成（角色 App 关闭也能主动找你）。
+# 每分钟 tick：遍历已注册的 pair 重算 impulse，命中就实时调 AI 生成 → outbox + 推送。
+# 不需要主动消息可注释掉这两行。
+[triggers]
+crons = ["* * * * *"]

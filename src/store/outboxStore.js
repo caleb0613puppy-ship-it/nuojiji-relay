@@ -15,23 +15,29 @@ export const DEFAULT_TTL_MS = 45 * 60 * 1000;
 // 同时跟踪 requestId 去重：已处理过的 requestId 在 TTL 内拒绝重复 /generate（返回 409）。
 // 各实现内部维护一个 requestId→createdAt 的小表。
 
+// Node 进程级单例：HTTP 路由与 cron tick 必须共享同一实例（否则 tick 写的 outbox 路由读不到）。
+let _nodeSingleton = null;
+
 export async function createOutboxStore(env) {
-    // Workers 环境：env.OUTBOX 是 KV 绑定
+    // Workers 环境：env.OUTBOX 是 KV 绑定（本就共享，不缓存）
     if (env && env.OUTBOX && typeof env.OUTBOX.put === 'function') {
         const { KvOutboxStore } = await import('./kvOutboxStore.js');
         return new KvOutboxStore(env.OUTBOX, env);
     }
 
     // Node 环境
+    if (_nodeSingleton) return _nodeSingleton;
     const storeKind = (typeof process !== 'undefined' && process.env?.RELAY_STORE) || 'memory';
     if (storeKind === 'sqlite') {
         try {
             const { SqliteOutboxStore } = await import('./sqliteOutboxStore.js');
-            return new SqliteOutboxStore(process.env.RELAY_SQLITE_PATH || './outbox.db');
+            _nodeSingleton = new SqliteOutboxStore(process.env.RELAY_SQLITE_PATH || './outbox.db');
+            return _nodeSingleton;
         } catch (e) {
             console.warn('[outbox] sqlite 不可用，回退到内存:', e?.message);
         }
     }
     const { MemoryOutboxStore } = await import('./memoryOutboxStore.js');
-    return new MemoryOutboxStore();
+    _nodeSingleton = new MemoryOutboxStore();
+    return _nodeSingleton;
 }
