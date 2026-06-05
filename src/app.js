@@ -125,31 +125,30 @@ export function createApp() {
         }
         await outbox.markRequest(requestId);
 
-        // 后台跑生成（不阻塞响应）。Workers 用 waitUntil 保证 fetch 返回后仍跑完。
-        const work = (async () => {
-            const id = makeMessageId(requestId);
-            let item;
-            try {
-                const content = await runGeneration(settings, messages, maxTokens);
-                item = {
-                    id, requestId,
-                    charId: meta?.charId ?? null,
-                    roundId: meta?.roundId ?? null,
-                    userId: meta?.userId ?? null,
-                    content, error: null, createdAt: nowMs(),
-                };
-            } catch (e) {
-                item = {
-                    id, requestId,
-                    charId: meta?.charId ?? null,
-                    roundId: meta?.roundId ?? null,
-                    userId: meta?.userId ?? null,
-                    content: null, error: String(e?.message || e), createdAt: nowMs(),
-                };
-            }
-            await outbox.put(inboxId, item);
+        // ⚠️ 在请求生命周期内「同步」跑完生成 + 写 outbox，再返回。
+        //    早期用 c.executionCtx.waitUntil 在响应后跑后台任务，但 Cloudflare 免费版 Workers 对
+        //    waitUntil 的 CPU/时长有严格配额，AI 调用(数秒~十几秒)常被掐断 → outbox 永远空。
+        //    手机端是 fire-and-forget + 轮询，不在乎 /generate 响应快慢，故改同步等待最可靠。
+        const id = makeMessageId(requestId);
+        let item;
+        try {
+            const content = await runGeneration(settings, messages, maxTokens);
+            item = {
+                id, requestId,
+                charId: meta?.charId ?? null, roundId: meta?.roundId ?? null, userId: meta?.userId ?? null,
+                content, error: null, createdAt: nowMs(),
+            };
+        } catch (e) {
+            item = {
+                id, requestId,
+                charId: meta?.charId ?? null, roundId: meta?.roundId ?? null, userId: meta?.userId ?? null,
+                content: null, error: String(e?.message || e), createdAt: nowMs(),
+            };
+        }
+        await outbox.put(inboxId, item);
 
-            // 发叫醒推送（best-effort，丢了靠手机轮询补）
+        // 发叫醒推送（best-effort，丢了靠手机轮询补）。推送可放 waitUntil（轻量，丢了也无妨）。
+        const pushWork = (async () => {
             try {
                 const subs = await sub.list(inboxId);
                 const payload = {
@@ -165,20 +164,13 @@ export function createApp() {
                 console.warn('[generate] push failed:', e?.message);
             }
         })();
-
-        // Workers：executionCtx.waitUntil 保证 fetch 返回后仍跑完；
-        // Node：没有 executionCtx（访问会抛），直接 fire-and-forget（长驻进程会自然跑完）。
         try {
-            if (typeof c.executionCtx?.waitUntil === 'function') {
-                c.executionCtx.waitUntil(work);
-            } else {
-                work.catch((e) => console.warn('[generate] work failed:', e?.message));
-            }
-        } catch {
-            work.catch((e) => console.warn('[generate] work failed:', e?.message));
-        }
+            if (typeof c.executionCtx?.waitUntil === 'function') c.executionCtx.waitUntil(pushWork);
+            else pushWork.catch(() => {});
+        } catch { pushWork.catch(() => {}); }
 
-        return c.json({ accepted: true, requestId }, 202);
+        // outbox 已写入，返回（手机轮询会拉到）。202 语义保留。
+        return c.json({ accepted: true, requestId, generated: !item.error }, 202);
     });
 
     app.get('/outbox', async (c) => {
