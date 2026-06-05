@@ -199,7 +199,7 @@ export function createApp() {
             inboxId, userId, charId, promptTemplate, proactiveProfile, lifeState,
             intensity, proactiveBias, recentMessages, aiSettings, quietHours,
             charUtcOffsetSeconds, proactiveEnabledAt, lastInteractionAt, enabled,
-            mode, interval, intervalUnit, probability,
+            mode, interval, intervalUnit, probability, timeSpec,
         } = body || {};
         if (!inboxId || userId == null || charId == null || !promptTemplate || !aiSettings) {
             return c.json({ error: 'inboxId / userId / charId / promptTemplate / aiSettings required' }, 400);
@@ -217,6 +217,7 @@ export function createApp() {
             proactiveEnabledAt: proactiveEnabledAt || Date.now(),
             lastInteractionAt: lastInteractionAt || 0,
             enabled: enabled !== false,
+            timeSpec: timeSpec || null, // 🕒 时间穿透：tick 时用它把 §NOW_*§ 哨兵填成即时真时间
         });
         return c.json({ ok: true });
     });
@@ -247,6 +248,25 @@ export function createApp() {
         const { proactive } = await getStores(c.env);
         await proactive.remove(inboxId, String(userId), String(charId));
         return c.json({ ok: true });
+    });
+
+    // 走线下剧情：暂停/恢复该 inbox 的所有主动生成。
+    // 手机端走线下时心跳式 pause（带 durationMs 自动过期，防没发 resume 永久哑火），退出时 resume。
+    app.post('/proactive/pause', async (c) => {
+        let body;
+        try { body = await c.req.json(); } catch { return c.json({ error: 'invalid json' }, 400); }
+        const { inboxId, paused, durationMs } = body || {};
+        if (!inboxId) return c.json({ error: 'inboxId required' }, 400);
+        const { proactive } = await getStores(c.env);
+        if (paused === false) {
+            await proactive.setPause(inboxId, 0);
+            return c.json({ ok: true, paused: false });
+        }
+        // 默认 10 分钟，手机端每隔几分钟续期；上限 1 小时防异常长暂停。
+        const dur = Math.min(60 * 60 * 1000, Math.max(60 * 1000, Number(durationMs) || 10 * 60 * 1000));
+        const until = nowMs() + dur;
+        await proactive.setPause(inboxId, until);
+        return c.json({ ok: true, paused: true, pausedUntil: until });
     });
 
     app.get('/proactive/status', async (c) => {

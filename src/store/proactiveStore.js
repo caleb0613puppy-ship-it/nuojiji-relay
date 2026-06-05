@@ -53,7 +53,18 @@ export async function createProactiveStore(env) {
 
 // ===== 内存实现（Node 默认）=====
 export class MemoryProactiveStore {
-    constructor() { this.kind = 'memory'; this.map = new Map(); }
+    constructor() { this.kind = 'memory'; this.map = new Map(); this.pauseMap = new Map(); }
+    // inbox 级暂停：走线下剧情时手机端调 /proactive/pause，tick 跳过该 inbox 的所有 pair。
+    // 存到点时间戳（pausedUntil），到点自动失效，防手机没发 resume 就永久哑火。
+    async setPause(inboxId, pausedUntil) {
+        if (pausedUntil && pausedUntil > Date.now()) this.pauseMap.set(inboxId, pausedUntil);
+        else this.pauseMap.delete(inboxId);
+    }
+    async getPausedUntil(inboxId) {
+        const until = this.pauseMap.get(inboxId) || 0;
+        if (until && until <= Date.now()) { this.pauseMap.delete(inboxId); return 0; }
+        return until;
+    }
     async upsert(rec) {
         const key = makePairKey(rec.inboxId, rec.userId, rec.charId);
         const prev = this.map.get(key) || {};
@@ -77,6 +88,21 @@ export class MemoryProactiveStore {
 // ⚠️ 不用 kv.list(最终一致,刚注册的对 cron 可能扫不到)，改维护全局索引 key `pidx`(强一致 get)。
 class KvProactiveStore {
     constructor(kv) { this.kv = kv; this.kind = 'kv'; }
+    // inbox 级暂停（同 Memory 实现说明）。用 KV 原生 TTL 兜底，pausedUntil 也写进 value 双保险。
+    async setPause(inboxId, pausedUntil) {
+        const key = `pause:${inboxId}`;
+        if (pausedUntil && pausedUntil > Date.now()) {
+            const ttlSec = Math.max(60, Math.ceil((pausedUntil - Date.now()) / 1000));
+            await this.kv.put(key, String(pausedUntil), { expirationTtl: ttlSec });
+        } else {
+            await this.kv.delete(key);
+        }
+    }
+    async getPausedUntil(inboxId) {
+        const raw = await this.kv.get(`pause:${inboxId}`);
+        const until = raw ? Number(raw) : 0;
+        return (until && until > Date.now()) ? until : 0;
+    }
     async _getIdx() {
         const raw = await this.kv.get('pidx');
         if (!raw) return [];

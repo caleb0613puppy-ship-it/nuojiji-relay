@@ -25,7 +25,29 @@ export class SqliteProactiveStore {
             );
             CREATE INDEX IF NOT EXISTS idx_proactive_enabled ON proactive(enabled);
             CREATE INDEX IF NOT EXISTS idx_proactive_inbox ON proactive(inboxId);
+            CREATE TABLE IF NOT EXISTS proactive_pause (
+                inboxId     TEXT PRIMARY KEY,
+                pausedUntil INTEGER NOT NULL
+            );
         `);
+    }
+    // inbox 级暂停：走线下剧情时手机端调 /proactive/pause，tick 跳过该 inbox 的所有 pair。
+    async setPause(inboxId, pausedUntil) {
+        if (pausedUntil && pausedUntil > Date.now()) {
+            this.db.prepare('INSERT OR REPLACE INTO proactive_pause (inboxId, pausedUntil) VALUES (?,?)')
+                .run(inboxId, pausedUntil);
+        } else {
+            this.db.prepare('DELETE FROM proactive_pause WHERE inboxId = ?').run(inboxId);
+        }
+    }
+    async getPausedUntil(inboxId) {
+        const row = this.db.prepare('SELECT pausedUntil FROM proactive_pause WHERE inboxId = ?').get(inboxId);
+        const until = row ? Number(row.pausedUntil) : 0;
+        if (until && until <= Date.now()) {
+            this.db.prepare('DELETE FROM proactive_pause WHERE inboxId = ?').run(inboxId);
+            return 0;
+        }
+        return until;
     }
     async upsert(rec) {
         const key = makePairKey(rec.inboxId, rec.userId, rec.charId);

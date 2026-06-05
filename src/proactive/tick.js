@@ -8,6 +8,7 @@ import { shouldFire, shouldFireInterval } from './impulseEngine.js';
 import { runGeneration } from '../ai/aiCaller.js';
 import { dispatchPush } from '../push/pushSender.js';
 import { nowMs } from '../util/ids.js';
+import { renderTimeTokens } from '../util/timeTokens.js';
 
 // 把滑窗消息渲染成转录文本（喂进 promptTemplate 的 {{RECENT_MESSAGES}}）
 function renderTranscript(recentMessages) {
@@ -35,8 +36,22 @@ export async function runProactiveTick(env) {
     const pairs = await proactive.listEnabled();
     let fired = 0;
 
+    // inbox 级暂停缓存：用户走线下剧情时手机端调 /proactive/pause，该 inbox 整个跳过本轮生成。
+    // 同一 inbox 多对只查一次。
+    const pauseCache = new Map();
+    async function isInboxPaused(inboxId) {
+        if (pauseCache.has(inboxId)) return pauseCache.get(inboxId);
+        let paused = false;
+        try { paused = (await proactive.getPausedUntil(inboxId)) > now; } catch { paused = false; }
+        pauseCache.set(inboxId, paused);
+        return paused;
+    }
+
     for (const rec of pairs) {
         try {
+            // 走线下剧情中：跳过该 inbox 的所有主动生成（用户在前台沉浸剧情，不该被线上消息打断）
+            if (await isInboxPaused(rec.inboxId)) continue;
+
             // 后端冷却：上次触发太近就跳过（防 1 分钟 cron 连发）
             if (rec.lastFiredAt && (now - rec.lastFiredAt) < BACKEND_FIRE_COOLDOWN_MS) continue;
 
@@ -67,7 +82,9 @@ export async function runProactiveTick(env) {
 
             // 命中 → 实时生成。messages 只有一条 system（手机端拼好的完整 prompt + 填充滑窗）
             const transcript = renderTranscript(rec.recentMessages);
-            const systemContent = fillTemplate(rec.promptTemplate, { transcript, reason: verdict.reason });
+            // 先填即时真时间哨兵（§NOW_*§），再填滑窗/理由占位符。
+            const timedTemplate = renderTimeTokens(rec.promptTemplate, rec.timeSpec, now);
+            const systemContent = fillTemplate(timedTemplate, { transcript, reason: verdict.reason });
             const messages = [{ role: 'system', content: systemContent }];
 
             let content = null, error = null;
