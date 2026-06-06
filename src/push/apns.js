@@ -40,6 +40,11 @@ export async function sendApns(env, subscription, payload) {
                 deviceToken: token,
                 title: payload.title, body: payload.body,
                 charId: payload.charId, userId: payload.userId, kind: payload.kind,
+                // 🖼️ iOS 通知扩展：头像 URL + 发信人 + 会话 id + mutable-content 标志（透传给中转 → APNs body）
+                avatarUrl: payload.avatarUrl || null,
+                senderName: payload.senderName || payload.title,
+                conversationId: payload.conversationId || null,
+                mutableContent: payload.mutableContent !== false,
             }),
         });
         if (res.status === 200) return { ok: true, gone: false };

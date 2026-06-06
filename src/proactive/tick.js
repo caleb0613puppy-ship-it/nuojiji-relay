@@ -138,7 +138,14 @@ export async function runProactiveTick(env) {
                             const delay = Math.min(4000, 600 + (body?.length || 0) * 120);
                             await sleep(delay);
                         }
-                        const payload = { title, body, charId: rec.charId, userId: rec.userId, kind: 'relay-outbox' };
+                        const payload = {
+                            title, body, charId: rec.charId, userId: rec.userId, kind: 'relay-outbox',
+                            // 🖼️ iOS 通知扩展用：头像 URL + 发信人名 + 会话 id → Communication Notification 左侧头像
+                            avatarUrl: rec.avatarUrl || null,
+                            senderName: title,
+                            conversationId: `${rec.userId}_${rec.charId}`,
+                            mutableContent: true,
+                        };
                         for (const s of subs) {
                             const res = await dispatchPush(env, s, payload);
                             if (res?.gone) await sub.remove(rec.inboxId, s);

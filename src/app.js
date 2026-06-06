@@ -56,7 +56,33 @@ export function createApp() {
         return c.json({ ok: true, store: outbox.kind || 'unknown', version: VERSION });
     });
 
+    // 🖼️ 角色头像公开读取（无鉴权）——iOS 通知扩展(独立进程,App 没运行)要能直接 GET 下载，
+    //    附到 Communication Notification 显示在通知左侧。头像只是公开可见的角色头像，无敏感信息。
+    //    存在 KV（OUTBOX namespace 的 av: 前缀），由 POST /avatar 写入。
+    app.get('/avatar/:key', async (c) => {
+        const key = c.req.param('key');
+        if (!key || !/^[\w.-]{1,128}$/.test(key)) return c.json({ error: 'bad key' }, 400);
+        const kv = c.env?.OUTBOX;
+        if (!kv) return c.json({ error: 'no store' }, 503);
+        const rec = await kv.get(`av:${key}`, { type: 'json' }).catch(() => null);
+        if (!rec || !rec.b64) return c.json({ error: 'not found' }, 404);
+        try {
+            const bin = Uint8Array.from(atob(rec.b64), (ch) => ch.charCodeAt(0));
+            return new Response(bin, {
+                status: 200,
+                headers: {
+                    'content-type': rec.mime || 'image/png',
+                    'cache-control': 'public, max-age=86400',
+                    'access-control-allow-origin': '*',
+                },
+            });
+        } catch {
+            return c.json({ error: 'decode failed' }, 500);
+        }
+    });
+
     // 以下全部要鉴权
+    app.use('/avatar', requireSecret); // POST /avatar 写入要鉴权（GET /avatar/:key 上面已公开放行）
     app.use('/generate', requireSecret);
     app.use('/outbox', requireSecret);
     app.use('/ack', requireSecret);
@@ -123,7 +149,14 @@ export function createApp() {
                         const delay = Math.min(4000, 600 + (body?.length || 0) * 120);
                         await sleep(delay);
                     }
-                    const payload = { title, body, charId: item.charId, userId: item.userId, kind: 'relay-outbox' };
+                    const payload = {
+                        title, body, charId: item.charId, userId: item.userId, kind: 'relay-outbox',
+                        // 🖼️ iOS 通知扩展：头像 URL + 发信人 + 会话 id（meta 随手机端 submitGeneration 传来）
+                        avatarUrl: meta?.avatarUrl || null,
+                        senderName: title,
+                        conversationId: `${item.userId}_${item.charId}`,
+                        mutableContent: true,
+                    };
                     for (const s of subs) {
                         const res = await dispatchPush(c.env, s, payload);
                         if (res?.gone) await sub.remove(inboxId, s);
@@ -217,6 +250,29 @@ export function createApp() {
         return c.json(result);
     });
 
+    // 🖼️ 写入角色头像（鉴权）：客户端注册 proactive 时上传角色头像 base64，存 KV 供推送/扩展使用。
+    //    body: { key, dataUrl }（dataUrl = "data:image/png;base64,xxx"）。返回公开读取路径 { url }。
+    app.post('/avatar', async (c) => {
+        let body;
+        try { body = await c.req.json(); } catch { return c.json({ error: 'invalid json' }, 400); }
+        const { key, dataUrl } = body || {};
+        if (!key || !/^[\w.-]{1,128}$/.test(key)) return c.json({ error: 'bad key' }, 400);
+        if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) return c.json({ error: 'dataUrl required' }, 400);
+        const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+        if (!m) return c.json({ error: 'bad dataUrl' }, 400);
+        const mime = m[1], b64 = m[2];
+        // 限大小：通知头像几十 KB 足够，封顶 ~512KB base64 防滥用 KV。
+        if (b64.length > 512 * 1024) return c.json({ error: 'avatar too large' }, 413);
+        const kv = c.env?.OUTBOX;
+        if (!kv) return c.json({ error: 'no store' }, 503);
+        try {
+            await kv.put(`av:${key}`, JSON.stringify({ mime, b64 }), { expirationTtl: 60 * 60 * 24 * 60 }); // 60 天
+        } catch (e) {
+            return c.json({ error: 'put failed', detail: String(e?.message || e) }, 500);
+        }
+        return c.json({ ok: true, url: `/avatar/${key}` });
+    });
+
     app.delete('/api/push/unsubscribe', async (c) => {
         let body;
         try { body = await c.req.json(); } catch { return c.json({ error: 'invalid json' }, 400); }
@@ -237,7 +293,7 @@ export function createApp() {
             inboxId, userId, charId, promptTemplate, proactiveProfile, lifeState,
             intensity, proactiveBias, recentMessages, aiSettings, quietHours,
             charUtcOffsetSeconds, proactiveEnabledAt, lastInteractionAt, enabled,
-            mode, interval, intervalUnit, probability, timeSpec, mcpContextServers,
+            mode, interval, intervalUnit, probability, timeSpec, mcpContextServers, avatarUrl,
         } = body || {};
         if (!inboxId || userId == null || charId == null || !promptTemplate || !aiSettings) {
             return c.json({ error: 'inboxId / userId / charId / promptTemplate / aiSettings required' }, 400);
@@ -257,6 +313,7 @@ export function createApp() {
             enabled: enabled !== false,
             timeSpec: timeSpec || null, // 🕒 时间穿透：tick 时用它把 §NOW_*§ 哨兵填成即时真时间
             mcpContextServers: Array.isArray(mcpContextServers) ? mcpContextServers : [], // 🧠 第三方记忆 MCP 直连配置
+            avatarUrl: typeof avatarUrl === 'string' ? avatarUrl : null, // 🖼️ 角色头像公开 URL，推送时带给 iOS 通知扩展显示在左侧
         });
         return c.json({ ok: true });
     });
